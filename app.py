@@ -1,4 +1,5 @@
 # app.py — Daily Transactions & Volume with Industry Pivot + NA-safe DoD + PF vs DM Pie
+# Reads a CSV bundled with the repo: data.csv
 # Expected headers (from your SQL export):
 #   PY_DM_TAG, MERCHANT_CAT, TRANSACTION_DATE, PERIOD, MONTH, MCC, INDUSTRY,
 #   MERCHANT_NAME, TRXN_CODE, AMOUNT, TRXN_COUNT, CARD_ACCEPTOR_ID,
@@ -6,6 +7,7 @@
 
 import csv
 import io
+import os
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -17,29 +19,31 @@ import streamlit as st
 st.set_page_config(page_title="Daily Volume by Industry", page_icon="📊", layout="wide")
 st.title("📊 Daily Transactions & Volume")
 
-
-df = pd.read_csv("transactions.csv")
-
 # -------------------------------------------------
-# 1) Load CSV robustly
+# 1) Load data.csv (bundled with the app)
 # -------------------------------------------------
-uploaded = st.file_uploader("Upload your CSV", type=["csv"])
-if not uploaded:
-    st.info("Please upload your aggregated CSV to proceed.")
+CSV_PATH = "data.csv"  # If you move the file, update this path (e.g., "data/data.csv")
+
+@st.cache_data(show_spinner=False)
+def load_csv_text(path: str) -> pd.DataFrame:
+    # Read as *text* first to avoid silent coercion; UTF-8-SIG handles BOM from Excel exports
+    return pd.read_csv(
+        path,
+        dtype=str,
+        low_memory=False,
+        encoding="utf-8-sig",
+        keep_default_na=False,   # don't auto-convert "NA"/"N/A" to NaN as strings
+        quoting=csv.QUOTE_MINIMAL
+    )
+
+if not os.path.exists(CSV_PATH):
+    st.error(f"Bundled CSV not found at `{CSV_PATH}`. Please add it to the repo and redeploy.")
     st.stop()
 
 try:
-    # Read as text first to avoid silent coercion and row loss
-    df = pd.read_csv(
-        uploaded,
-        dtype=str,
-        low_memory=False,
-        encoding="utf-8-sig",      # handles BOM from Excel
-        keep_default_na=False,     # avoids auto NA conversion of strings like "N/A"
-        quoting=csv.QUOTE_MINIMAL,
-    )
+    df = load_csv_text(CSV_PATH)
 except Exception as e:
-    st.error(f"Could not read CSV: {e}")
+    st.error(f"Could not read `{CSV_PATH}`: {e}")
     st.stop()
 
 # Normalize headers
@@ -49,11 +53,11 @@ with st.expander("🔎 Debug: columns & sample"):
     st.write("Columns:", list(df.columns))
     st.dataframe(df.head(10), use_container_width=True)
 
-# Basic schema sanity
+# Required columns
 must_have = ["TRANSACTION_DATE", "TRXN_COUNT", "INDUSTRY", "PY_DM_TAG"]
 missing = [c for c in must_have if c not in df.columns]
 if missing:
-    st.error(f"Missing required columns: {missing}")
+    st.error(f"Missing required columns in CSV: {missing}")
     st.stop()
 
 # -------------------------------------------------
@@ -64,20 +68,23 @@ def normalize_text(series: pd.Series) -> pd.Series:
     return series.astype(str).str.replace(r"\s+", " ", regex=True).str.strip()
 
 def norm_one(x) -> str:
-    """Normalize a single scalar safely to lowercase token."""
+    """Normalize one scalar safely to lowercase token for matching."""
     if pd.isna(x):
         return ""
     return normalize_text(pd.Series([x])).iloc[0].lower()
 
-for col in ["PY_DM_TAG", "MCC", "INDUSTRY", "MERCHANT_CAT", "MERCHANT_NAME", "TRXN_CODE", "USD_PHP_TAG", "CARD_ACCEPTOR_ID"]:
+for col in [
+    "PY_DM_TAG", "MCC", "INDUSTRY", "MERCHANT_CAT", "MERCHANT_NAME",
+    "TRXN_CODE", "USD_PHP_TAG", "CARD_ACCEPTOR_ID"
+]:
     if col in df.columns:
         df[col] = normalize_text(df[col])
 
 def to_float_safe(s: pd.Series) -> pd.Series:
     """Parse floats that may contain commas, $, and parentheses for negatives."""
     s = s.astype(str).str.strip()
-    s = s.str.replace(r"[,$]", "", regex=True)                 # remove thousands separators and $
-    s = s.str.replace(r"\(([\d\.]+)\)", r"-\1", regex=True)    # (123.45) -> -123.45
+    s = s.str.replace(r"[,$]", "", regex=True)
+    s = s.str.replace(r"\(([\d\.]+)\)", r"-\1", regex=True)  # (123.45) -> -123.45
     return pd.to_numeric(s, errors="coerce")
 
 def to_int_safe(s: pd.Series) -> pd.Series:
@@ -93,7 +100,7 @@ for col in ["AMOUNT", "DB_CR_AMOUNT", "CONVERTED_AMOUNT"]:
         df[col] = to_float_safe(df[col])
 
 # -------------------------------------------------
-# 3) Date parsing with heuristics (pick best)
+# 3) Date parsing heuristic — pick the best parse
 # -------------------------------------------------
 raw_date = df["TRANSACTION_DATE"].astype(str).str.strip()
 
@@ -125,11 +132,11 @@ with st.expander("🧪 Parse quality"):
         "date_parse_mode_selected": best_label,
         "unparsed_date_rows": unparsed_rows,
         "TRXN_COUNT_total_raw": int(pd.to_numeric(df["TRXN_COUNT"].fillna(0), errors="coerce").sum()),
-        "PY_DM_TAG values": df["PY_DM_TAG"].dropna().unique().tolist()[:10],
+        "PY_DM_TAG values (sample)": df["PY_DM_TAG"].dropna().unique().tolist()[:10],
     })
 
 # -------------------------------------------------
-# 4) Volume resolution (prefer CONVERTED_AMOUNT → DB_CR_AMOUNT → AMOUNT signed)
+# 4) Volume column resolution (prefer CONVERTED_AMOUNT → DB_CR_AMOUNT → AMOUNT signed)
 # -------------------------------------------------
 def ensure_signed_amount(frame: pd.DataFrame, raw_col: str) -> pd.Series:
     """Signs AMOUNT via DB_CR_TAG: 'Credit'/CR => negative, else positive."""
@@ -155,7 +162,6 @@ else:
 # -------------------------------------------------
 # 5) PY_DM_TAG filter (single-select)
 # -------------------------------------------------
-# Canonicalize common labels but allow any distinct values from data
 tag_options = ["All"] + sorted(df["PY_DM_TAG"].dropna().astype(str).unique().tolist())
 selected_tag = st.selectbox("Filter: PY_DM_TAG", options=tag_options, index=0)
 
@@ -179,14 +185,14 @@ daily_totals = (
     .sort_values("day")
 )
 
-# --- NA-safe DoD computation (no boolean on <NA>) ---
+# DoD (NA-safe) — avoid boolean checks on nullable types
 prev_count = daily_totals["daily_trxn_count"].shift(1).astype("float")
 prev_vol   = daily_totals["daily_volume"].shift(1).astype("float")
 
 daily_totals["DoD_Δ_count"] = daily_totals["daily_trxn_count"].astype("float") - prev_count
 daily_totals["DoD_Δ_vol"]   = daily_totals["daily_volume"].astype("float")      - prev_vol
 
-# Denominator is NaN if previous is 0 or NaN → result NaN (undefined) instead of raising
+# Denominator is NaN if previous is 0 or NaN → undefined percent remains NaN
 den_count = prev_count.replace(0.0, np.nan)
 den_vol   = prev_vol.replace(0.0, np.nan)
 
@@ -198,7 +204,8 @@ daily_totals["DoD_%_vol"]   = daily_totals["DoD_Δ_vol"]   / den_vol
 # -------------------------------------------------
 industry_pivot = (
     df_valid
-    .pivot_table(index="day", columns="INDUSTRY", values="_volume", aggfunc="sum", fill_value=0.0)
+    .pivot_table(index="day", columns="INDUSTRY", values="_volume",
+                 aggfunc="sum", fill_value=0.0)
     .sort_index()
 )
 
@@ -221,7 +228,7 @@ ordered_cols = [
 matrix = matrix.reindex(columns=[c for c in ordered_cols if c in matrix.columns])
 
 # -------------------------------------------------
-# 8) KPI row (latest day) with simple formatting
+# 8) KPI row (latest day) with friendly formatting
 # -------------------------------------------------
 def fmt_int(x):
     return "—" if pd.isna(x) else f"{int(x):,}"
@@ -265,10 +272,12 @@ with right:
 
 if industry_order:
     st.subheader("Daily Volume — Top Industries (by latest day)")
-    top_n = st.slider("Top N industries to plot", min_value=3, max_value=min(20, len(industry_order)), value=min(10, len(industry_order)))
+    top_n = st.slider("Top N industries to plot", min_value=3, max_value=min(20, len(industry_order)),
+                      value=min(10, len(industry_order)))
     top_cols = industry_order[:top_n]
     melt_df = matrix.melt(id_vars=["day"], value_vars=top_cols, var_name="INDUSTRY", value_name="volume")
-    fig_ind = px.line(melt_df, x="day", y="volume", color="INDUSTRY", markers=False, title=f"Daily Volume — Top {top_n} Industries")
+    fig_ind = px.line(melt_df, x="day", y="volume", color="INDUSTRY", markers=False,
+                      title=f"Daily Volume — Top {top_n} Industries")
     fig_ind.update_layout(xaxis_title="Day", yaxis_title="Volume")
     st.plotly_chart(fig_ind, use_container_width=True)
 
@@ -278,7 +287,7 @@ if industry_order:
 st.markdown("---")
 st.subheader("Payment Facilitator vs Direct Merchant — Share")
 
-pie_basis = st.selectbox("Pie basis", ["Latest day", "Selected range (all days read)"], index=0)
+pie_basis  = st.selectbox("Pie basis", ["Latest day", "Selected range (all days read)"], index=0)
 pie_metric = st.selectbox("Pie metric", ["Volume", "Transaction Count"], index=0)
 
 # Build a working frame that ignores the PY_DM_TAG filter (so you always see both slices)
