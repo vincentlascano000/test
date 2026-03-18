@@ -1,5 +1,5 @@
 # app.py — Daily Transactions & Volume with Industry Pivot + NA-safe DoD + PF vs DM Pie
-# Reads a CSV bundled with the repo: data.csv
+# Loads a CSV from your GitHub raw URL (no upload required).
 # Expected headers (from your SQL export):
 #   PY_DM_TAG, MERCHANT_CAT, TRANSACTION_DATE, PERIOD, MONTH, MCC, INDUSTRY,
 #   MERCHANT_NAME, TRXN_CODE, AMOUNT, TRXN_COUNT, CARD_ACCEPTOR_ID,
@@ -7,7 +7,6 @@
 
 import csv
 import io
-import os
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -20,40 +19,43 @@ st.set_page_config(page_title="Daily Volume by Industry", page_icon="📊", layo
 st.title("📊 Daily Transactions & Volume")
 
 # -------------------------------------------------
-# 1) Load data.csv (bundled with the app)
+# 1) Load CSV from GitHub raw URL (with a graceful fallback)
 # -------------------------------------------------
-CSV_PATH = "data.csv"  # If you move the file, update this path (e.g., "data/data.csv")
+RAW_URL = "https://raw.githubusercontent.com/vincentlascano000/test/main/data.csv"
 
 @st.cache_data(show_spinner=False)
-def load_csv_text(path: str) -> pd.DataFrame:
-    # Read as *text* first to avoid silent coercion; UTF-8-SIG handles BOM from Excel exports
+def load_csv_from_url(url: str) -> pd.DataFrame:
+    # Read as text (dtype=str) first to avoid silent coercion; UTF-8-SIG handles Excel BOM
     return pd.read_csv(
-        path,
+        url,
         dtype=str,
         low_memory=False,
         encoding="utf-8-sig",
-        keep_default_na=False,   # don't auto-convert "NA"/"N/A" to NaN as strings
-        quoting=csv.QUOTE_MINIMAL
+        keep_default_na=False,
+        quoting=csv.QUOTE_MINIMAL,
     )
 
-if not os.path.exists(CSV_PATH):
-    st.error(f"Bundled CSV not found at `{CSV_PATH}`. Please add it to the repo and redeploy.")
-    st.stop()
-
 try:
-    df = load_csv_text(CSV_PATH)
+    df = load_csv_from_url(RAW_URL)
 except Exception as e:
-    st.error(f"Could not read `{CSV_PATH}`: {e}")
-    st.stop()
-
-# Normalize headers
-df.columns = [c.strip() for c in df.columns]
+    st.error(
+        "Could not load the CSV from the GitHub URL.\n\n"
+        "• Check that the repository/branch is public and the path is correct.\n"
+        f"• URL tried: {RAW_URL}\n"
+        f"• Details: {e}\n\n"
+        "You may upload a CSV below as a fallback."
+    )
+    upl = st.file_uploader("Upload CSV", type=["csv"])
+    if upl is None:
+        st.stop()
+    df = pd.read_csv(upl, dtype=str, low_memory=False, encoding="utf-8-sig", keep_default_na=False)
 
 with st.expander("🔎 Debug: columns & sample"):
+    st.write("CSV source:", RAW_URL)
     st.write("Columns:", list(df.columns))
     st.dataframe(df.head(10), use_container_width=True)
 
-# Required columns
+# Basic schema sanity
 must_have = ["TRANSACTION_DATE", "TRXN_COUNT", "INDUSTRY", "PY_DM_TAG"]
 missing = [c for c in must_have if c not in df.columns]
 if missing:
