@@ -17,6 +17,9 @@ import streamlit as st
 st.set_page_config(page_title="Daily Volume by Industry", page_icon="📊", layout="wide")
 st.title("📊 Daily Transactions & Volume")
 
+
+df = pd.read_csv("transactions.csv")
+
 # -------------------------------------------------
 # 1) Load CSV robustly
 # -------------------------------------------------
